@@ -1,0 +1,65 @@
+# Mirrors the LG player package to S3 so the fleet-facing download URLs are
+# served by CloudFront instead of Netlify (PF-201).
+#
+# LG webOS signage TVs poll fugo.ai/fugo.ipk (and, after the next app release
+# changes the updater URL, dist.fugo.ai/fugo.ipk) for their ~12 MB package.
+# Both paths resolve to s3://fugo-support/fugo.ipk behind CloudFront, so on
+# every published release this workflow copies the asset there and
+# invalidates the /fugo.ipk cache on the serving distributions. Without the
+# invalidation the CDNs would serve the previous version for up to a day
+# (default TTL) — acceptable, but the fleet self-heals faster with it.
+#
+# Requirements:
+#   - Repo secrets AWS_KEY_ACCESS / AWS_KEY_SECRET: access key of the
+#     `fugo-lg-release-sync` IAM user (created by fugo-infra; key issued
+#     manually). Scoped to this one S3 object + the two distributions.
+#   - Repo variable APEX_DISTRIBUTION_ID (optional): the fugo.ai apex
+#     distribution ID from fugo-infra's `apex_redirect` output. Leave unset
+#     until that distribution exists; dist.fugo.ai (E3KMKXPS3NFRLD) is
+#     always invalidated.
+name: Sync fugo.ipk to S3
+
+on:
+  release:
+    types: [published]
+  # Manual runs mirror the latest release, e.g. after fixing secrets.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download ${TAG:+"$TAG"} \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'com.lg.app.signage.ipk' \
+            --output fugo.ipk
+          ls -l fugo.ipk
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_KEY_ACCESS }}
+          aws-secret-access-key: ${{ secrets.AWS_KEY_SECRET }}
+          aws-region: eu-west-2
+
+      - name: Upload to S3
+        run: |
+          aws s3 cp fugo.ipk s3://fugo-support/fugo.ipk \
+            --content-type application/octet-stream \
+            --content-disposition 'attachment; filename="fugo.ipk"'
+
+      - name: Invalidate CloudFront /fugo.ipk
+        env:
+          APEX_DISTRIBUTION_ID: ${{ vars.APEX_DISTRIBUTION_ID }}
+        run: |
+          for dist in E3KMKXPS3NFRLD ${APEX_DISTRIBUTION_ID:+"$APEX_DISTRIBUTION_ID"}; do
+            aws cloudfront create-invalidation --distribution-id "$dist" --paths /fugo.ipk
+          done
