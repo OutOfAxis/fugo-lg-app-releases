@@ -10,23 +10,30 @@
 # (default TTL) — acceptable, but the fleet self-heals faster with it.
 #
 # Requirements:
-#   - Repo secrets AWS_KEY_ACCESS / AWS_KEY_SECRET: access key of the
-#     `fugo-lg-release-sync` IAM user (created by fugo-infra; key issued
-#     manually). Scoped to this one S3 object + the two distributions.
+#   - The `fugo-lg-release-sync` IAM role from fugo-infra (PF-201), assumed
+#     via GitHub OIDC — no static credentials. Trust is pinned to this
+#     repository; the policy is scoped to the one S3 object + the two
+#     distributions.
 #   - Repo variable APEX_DISTRIBUTION_ID (optional): the fugo.ai apex
 #     distribution ID from fugo-infra's `apex_redirect` output. Leave unset
 #     until that distribution exists; dist.fugo.ai (E3KMKXPS3NFRLD) is
 #     always invalidated.
+#
+# Upload notes (constraints from the role's least-privilege policy + the
+# bucket's ACL settings): plain `aws s3 cp` to the fixed key — no `--acl`
+# (the bucket blocks canned ACLs; public read comes from the bucket policy)
+# and no `aws s3 sync` (the role has no ListBucket/GetObject).
 name: Sync fugo.ipk to S3
 
 on:
   release:
     types: [published]
-  # Manual runs mirror the latest release, e.g. after fixing secrets.
+  # Manual runs mirror the latest release, e.g. after fixing IAM/config.
   workflow_dispatch:
 
 permissions:
   contents: read
+  id-token: write # OIDC token for assuming the AWS role
 
 jobs:
   sync:
@@ -46,8 +53,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_KEY_ACCESS }}
-          aws-secret-access-key: ${{ secrets.AWS_KEY_SECRET }}
+          role-to-assume: arn:aws:iam::376810676256:role/fugo-lg-release-sync
           aws-region: eu-west-2
 
       - name: Upload to S3
